@@ -3,17 +3,51 @@
 Turns one ADRE Sxp **Tabular List** export into **one file per channel**, with the
 transducer configuration listed **once**.
 
+## Quick start
+
+Needs [Python 3.10 or newer](https://www.python.org/downloads/) and
+[Git](https://git-scm.com/downloads). Tick **Add python.exe to PATH** in the Python
+installer.
+
 ```bash
+git clone https://github.com/vk8459698/Data-channels-extractor.git
+cd Data-channels-extractor
 pip install -r requirements.txt
+```
+
+Copy your ADRE static export into that folder, then run it. If your file has a
+different name, use that name instead of `static.csv`:
+
+```bash
 python main.py static.csv
 ```
 
 ```
-export_static.csv: 21 channels, 735 samples
+static.csv: 21 channels, 735 samples
   configuration rows 735 -> 21 (714 duplicates removed)
   wrote 21 channel files + channels.csv
   folder channels
 ```
+
+The per-channel files are now in the `channels` folder, ready to upload.
+
+You do not have to copy the export in first. Point it anywhere, and the `channels`
+folder is created next to that file:
+
+```bash
+python main.py "C:\path\to\export_static.csv"
+```
+
+### Later, to get the newest version
+
+```bash
+git pull
+```
+
+### No Git installed?
+
+On the repository page choose **Code → Download ZIP**, unzip it, open a terminal in
+the unzipped folder, and continue from `pip install -r requirements.txt`.
 
 ## The problem this solves
 
