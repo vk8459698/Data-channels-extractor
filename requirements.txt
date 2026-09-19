@@ -1,0 +1,8 @@
+# The splitter itself uses only the Python standard library, so this file
+# installs nothing. It exists so the documented setup works unchanged:
+#
+#     pip install -r requirements.txt
+#     python main.py static.csv
+#
+# Only the test suite needs a third-party package.
+pytest>=8.0

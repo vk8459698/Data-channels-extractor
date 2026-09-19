@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+
+# Machine data and generated output stay out of the repository.
+channels/
+*.csv
+!tests/**/*.csv
