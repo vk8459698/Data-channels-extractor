@@ -1,0 +1,145 @@
+{
+  "description": "ADRE Sxp export: open DB, right-click database name → Plots → Tabular List / Timebase, Export Plots.",
+  "channels": ["Tabular List", "Timebase (sync)", "Timebase (async)"],
+  "title_re": "^ADRE",
+  "steps": [
+    {
+      "action": "wait",
+      "seconds": 2,
+      "note": "ADRE main window"
+    },
+    {
+      "action": "focus_main",
+      "title_re": "^ADRE",
+      "note": "Bring ADRE® Sxp to the foreground"
+    },
+    {
+      "action": "open_database",
+      "title_re": "^ADRE",
+      "note": "Toolbar Open → Database Manager child form; select FlexGrid Name cell; m_OpenButton"
+    },
+    {
+      "action": "select_sampling_cards",
+      "title_re": "^ADRE",
+      "card_name": "Dynamic Sampling Card",
+      "note": "Click the database name only (do not expand)"
+    },
+    {
+      "action": "context_plots",
+      "plot": "Tabular List",
+      "note": "Right-click database → Plots → Tabular List"
+    },
+    {
+      "action": "wait",
+      "seconds": 6,
+      "note": "New Tabular List Plot Group"
+    },
+    {
+      "action": "tree_click",
+      "tree_index": 1,
+      "name": "New Tabular List Plot Group",
+      "double": true,
+      "note": "Double-click the new plot group so Export Plots enables"
+    },
+    {
+      "action": "wait",
+      "seconds": 2
+    },
+    {
+      "action": "export_plots",
+      "plot_group_contains": "Tabular List",
+      "note": "m_c1PlotGroupToolBar Export Plots (bottom icon, not HV top toolbar)"
+    },
+    {
+      "action": "wait",
+      "seconds": 2,
+      "note": "Save dialog"
+    },
+    {
+      "action": "open_file_dialog",
+      "path": "{inbox}\\export_static.csv",
+      "note": "Static Tabular List CSV"
+    },
+    {
+      "action": "wait",
+      "seconds": 20,
+      "note": "Static export write"
+    },
+    {
+      "action": "select_sampling_cards",
+      "title_re": "^ADRE",
+      "card_name": "Dynamic Sampling Card",
+      "note": "Close HV, reselect the database for Timebase"
+    },
+    {
+      "action": "context_plots",
+      "plot": "Timebase",
+      "plot_timeout": 30,
+      "note": "Right-click database → Plots → Timebase"
+    },
+    {
+      "action": "wait",
+      "seconds": 12,
+      "note": "New Timebase Plot Group"
+    },
+    {
+      "action": "tree_click",
+      "tree_index": 1,
+      "name": "New Timebase Plot Group",
+      "name_contains": "Timebase Plot Group",
+      "double": true,
+      "timeout": 60,
+      "note": "Timebase plot group if HV did not already open it"
+    },
+    {
+      "action": "wait",
+      "seconds": 2
+    },
+    {
+      "action": "export_plots",
+      "plot_group_contains": "Timebase",
+      "note": "Bottom Export Plots on the Timebase plot (sync)"
+    },
+    {
+      "action": "wait",
+      "seconds": 2
+    },
+    {
+      "action": "open_file_dialog",
+      "path": "{inbox}\\export_sync.csv",
+      "note": "Sync Waveform timebase CSV"
+    },
+    {
+      "action": "wait",
+      "seconds": 60,
+      "note": "Sync timebase export write"
+    },
+    {
+      "action": "configure_plots",
+      "plot_group_contains": "Timebase",
+      "from_variable": "Sync Waveform",
+      "variable": "Async Waveform",
+      "note": "Set Variable cells to Async, OK, wait 2 minutes, then export"
+    },
+    {
+      "action": "export_plots",
+      "plot_group_contains": "Timebase",
+      "note": "Export Plots after the 2-minute wait, then Save/OK the CSV"
+    },
+    {
+      "action": "wait",
+      "seconds": 2
+    },
+    {
+      "action": "open_file_dialog",
+      "path": "{inbox}\\export_async.csv",
+      "note": "Async Waveform timebase CSV"
+    },
+    {
+      "action": "wait_for_csvs",
+      "min_files": 3,
+      "timeout_seconds": 900,
+      "note": "tabular + sync timebase + async timebase"
+    }
+  ]
+}

@@ -1,8 +1,9 @@
-# The splitter itself uses only the Python standard library, so this file
-# installs nothing. It exists so the documented setup works unchanged:
+# The splitter itself uses only the Python standard library.
+# Optional: on the Windows machine that has ADRE Sxp, also install pywinauto
+# so `python main.py database.zip --adre` can drive the CSV export.
 #
 #     pip install -r requirements.txt
 #     python main.py static.csv
-#
-# Only the test suite needs a third-party package.
+#     python main.py job.zip --adre
 pytest>=8.0
+# pywinauto>=0.6.8

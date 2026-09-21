@@ -9,5 +9,8 @@ env/
 
 # Machine data and generated output stay out of the repository.
 channels/
+groups/
+_unzipped/
+exports/
 *.csv
 !tests/**/*.csv

@@ -1,13 +1,6 @@
-# ADRE Sxp static export splitter
+# Data-channels-extractor
 
-Turns one ADRE Sxp **Tabular List** export into **one file per channel**, with the
-transducer configuration listed **once**.
-
-## Quick start
-
-Needs [Python 3.10 or newer](https://www.python.org/downloads/) and
-[Git](https://git-scm.com/downloads). Tick **Add python.exe to PATH** in the Python
-installer.
+One program from **ADRE zip (or static CSV) → per-channel CSVs → website upload groups**.
 
 ```bash
 git clone https://github.com/vk8459698/Data-channels-extractor.git
@@ -15,119 +8,78 @@ cd Data-channels-extractor
 pip install -r requirements.txt
 ```
 
-Copy your ADRE static export into that folder, then run it. If your file has a
-different name, use that name instead of `static.csv`:
+## What to run
+
+| What you have | Command |
+| --- | --- |
+| Tabular List CSV (`export_static.csv`) | `python main.py static.csv` |
+| Zip of that CSV | `python main.py job.zip` |
+| ADRE Sxp database zip (`.adb` / `ConfigDBFile.xml` / `Data\`) | `python main.py job.zip --adre` |
+
+`--adre` is the native-database path. It needs **Windows**, **ADRE Sxp installed**, and `pip install pywinauto`. Native `.dat` files cannot be turned into CSV without ADRE.
 
 ```bash
-python main.py static.csv
+python main.py "C:\path\to\export_static.csv" -o out
+python main.py "C:\path\to\database.zip" --adre -o out
 ```
-
-```
-static.csv: 21 channels, 735 samples
-  configuration rows 735 -> 21 (714 duplicates removed)
-  wrote 21 channel files + channels.csv
-  folder channels
-```
-
-The per-channel files are now in the `channels` folder, ready to upload.
-
-You do not have to copy the export in first. Point it anywhere, and the `channels`
-folder is created next to that file:
-
-```bash
-python main.py "C:\path\to\export_static.csv"
-```
-
-### Later, to get the newest version
-
-```bash
-git pull
-```
-
-### No Git installed?
-
-On the repository page choose **Code → Download ZIP**, unzip it, open a terminal in
-the unzipped folder, and continue from `pip install -r requirements.txt`.
-
-## The problem this solves
-
-ADRE Sxp writes the Tabular List export as a single pipe-delimited UTF-16 file and
-repeats the **entire transducer configuration block ahead of every sample block**.
-A 21-channel, 35-sample export therefore contains 735 configuration rows where 21
-would do — roughly half the file is duplicated configuration.
-
-That breaks tools that expect one table per file. A dashboard that reads the probe
-name, mounting angle and units from a single configuration row above the data finds
-22 configuration lines instead of 2, gives up, and ends up with no channel identity
-at all. The repeated `CH#|...` header lines are then parsed as if they were data.
 
 ## What you get
 
-Running the command creates a `channels/` folder next to the input:
-
 ```
-channels/
-  39VS21-1HD-LP3.csv     one channel, config row once, then its samples
-  39VS22-1VD-LP4.csv
-  39V-1A.csv
-  KEYPH.-LP13.csv
-  ...
-  channels.csv           every transducer listed once, plain comma CSV
-```
-
-Each channel file is tab-delimited UTF-16 in the layout ADRE uses for a
-single-channel export:
-
-```
-                                                        <- two blank lines
-CH#  Channel Name     Machine Name  Status  Angle  Direction  Speed Units(P)  Amp Unit  Phase Unit
-1    39VS21-1HD-LP3   GAS TURBINE   OK      45°    Right      rpm             mil pp    deg
-                                                        <- one blank line
-CH#  Channel Name     Sample#  Sample Cause  Date                    Speed(P)  ...
-1    39VS21-1HD-LP3   1        DT-T          03Mar1953 03:03:03.468  3599      ...
+out/
+  channels/          every probe, one file each (uploadable)
+    BRG1X.csv
+    BRG1Y.csv
+    Kph 1.csv
+    39V-1A.csv
+    THRUST A-LP9.csv
+    channels.csv     transducer table, once
+  groups/            website upload batches (do not mix these)
+    rotor/           proximity XY + keyphasor  ← start here
+    casing/          seismic
+    thrust/          thrust position / load
+    manifest.csv
 ```
 
-`channels.csv` is the configuration table on its own, one row per probe, so you can
-open it in Excel without wading through sample data:
+On rotordyn.ai: **Upload → Select CSV → pick one group folder** (all files in `groups/rotor` together). Do not upload the original `export_static.csv`. Do not drop all 21 channels in one go.
 
-```csv
-CH#,Channel Name,Machine Name,Status,Angle,Direction,Speed Units(P),Amp Unit,Phase Unit,Samples,File
-1,39VS21-1HD-LP3,GAS TURBINE,OK,45°,Right,rpm,mil pp,deg,35,39VS21-1HD-LP3.csv
-```
+`39VS21-1HD-LP3` is rewritten as `BRG1X` (and `1VD` as `BRG1Y`) so Orbit and Centerline can pair the probes. Plant tags stay in `channels.csv` under **ADRE Name**. Pass `--keep-names` to leave the tags in the files.
 
-## Nothing is altered
+## The problem this solves
 
-Cell text is copied through verbatim, including ADRE's vendor status codes such as
-`228BMA` and `54FNX`. The tool only removes the repeated block framing. It never
-rounds, reformats or renames a value.
+ADRE Sxp writes the Tabular List export as one pipe-delimited UTF-16 file and repeats the **entire transducer configuration block ahead of every sample block**. A 21-channel, 35-sample export therefore contains 735 configuration rows where 21 would do. The website cannot read that file.
 
-Two things are tidied:
+This tool:
 
-- **Duplicate samples.** If the same `Sample#` appears twice for a channel, because
-  plot groups overlapped, the second copy is dropped.
-- **Columns a channel never fills.** A proximity probe leaves `Process Variable`
-  blank on every row, so that column is omitted from its file. Pass
-  `--keep-empty-columns` to keep them.
+1. Optionally drives ADRE Sxp to export CSV from a database zip (`--adre`).
+2. Splits the Tabular List into one file per channel, config row once.
+3. Names bearing probes for plotting.
+4. Copies them into **rotor / casing / thrust** groups the website accepts.
+
+Cell text is copied verbatim, including vendor status codes such as `228BMA`.
 
 ## Options
 
 | Flag | Effect |
 | --- | --- |
-| `-o DIR`, `--out DIR` | Write somewhere other than `channels/` beside the input |
+| `-o DIR`, `--out DIR` | Write `channels/` and `groups/` under DIR |
+| `--adre` | Open the zip in ADRE Sxp and export CSV, then split and group |
+| `--keep-names` | Keep plant tags (`39VS21-1HD-LP3`) instead of `BRG1X` |
 | `--keep-empty-columns` | Keep columns that are blank for the whole channel |
-| `--encoding ENC` | Output encoding, default `utf-16` to match ADRE |
-
-Several exports at once:
-
-```bash
-python main.py export_static.csv another_export.csv -o all_channels
-```
+| `--encoding ENC` | Output encoding, default `utf-16` |
 
 ## Requirements
 
-Python 3.10 or newer. The splitter uses only the standard library; `pytest` is
-needed only to run the tests.
+Python 3.10+. The CSV split uses only the standard library.
 
 ```bash
 python -m pytest -q
 ```
+
+For `--adre` on the extraction PC:
+
+```bash
+pip install pywinauto
+```
+
+ADRE Sxp must already be installed there. The click path lives in `adre_export_recipe.json`.
