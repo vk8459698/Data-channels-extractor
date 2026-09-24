@@ -68,6 +68,7 @@
     {
       "action": "split_static",
       "path": "{inbox}\\export_static.csv",
+      "timeout": 120,
       "note": "Split and group rotors only after static Tabular List is extracted"
     },
     {

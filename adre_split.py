@@ -107,11 +107,31 @@ def read_lines(path: str | Path) -> list[str]:
     return decode_export(Path(path).read_bytes())
 
 
+def _tabular_header_kind(line: str) -> str | None:
+    """``meta`` / ``sample`` even when ADRE used tabs instead of pipes."""
+    cells = [c.strip() for c in line.replace("\t", "|").split("|")]
+    if len(cells) < 3 or cells[0] != "CH#" or cells[1] != "Channel Name":
+        return None
+    if cells[2] == "Machine Name":
+        return "meta"
+    if cells[2] == "Sample#":
+        return "sample"
+    return None
+
+
 def is_tabular_export(lines: list[str]) -> bool:
-    return any(
-        line.startswith(SAMPLE_HEADER_PREFIX) or line.startswith(META_HEADER_PREFIX)
-        for line in lines[:80]
-    )
+    return any(_tabular_header_kind(line) for line in lines[:80])
+
+
+def file_is_tabular(path: str | Path) -> bool:
+    """True once ADRE has written a real Tabular List (not an empty Save stub)."""
+    path = Path(path)
+    try:
+        if not path.is_file() or path.stat().st_size < 40:
+            return False
+        return is_tabular_export(read_lines(path))
+    except (OSError, UnicodeError, NotATabularExport):
+        return False
 
 
 def safe_filename(name: str) -> str:
@@ -291,22 +311,24 @@ def read_blocks(
         if not line.strip():
             mode = ""
             continue
-        if line.startswith(META_HEADER_PREFIX):
+        kind = _tabular_header_kind(line)
+        delim = "\t" if line.count("\t") > line.count("|") else "|"
+        if kind == "meta":
             mode = "meta"
-            meta_header = _strip_trailing_blanks([c.strip() for c in line.split("|")])
+            meta_header = _strip_trailing_blanks([c.strip() for c in line.split(delim)])
             continue
-        if line.startswith(SAMPLE_HEADER_PREFIX):
+        if kind == "sample":
             mode = "sample"
-            sample_header = _strip_trailing_blanks([c.strip() for c in line.split("|")])
+            sample_header = _strip_trailing_blanks([c.strip() for c in line.split(delim)])
             continue
         if mode == "meta" and meta_header:
-            cells = _split_row(line, len(meta_header))
+            cells = _split_row(line, len(meta_header), delim)
             name = cells[meta_header.index("Channel Name")].strip()
             if name:
                 meta_by_channel.setdefault(name, cells)
             continue
         if mode == "sample" and sample_header:
-            cells = _split_row(line, len(sample_header))
+            cells = _split_row(line, len(sample_header), delim)
             name = cells[sample_header.index("Channel Name")].strip()
             number = cells[sample_header.index("Sample#")].strip()
             if not name or not number.isdigit():

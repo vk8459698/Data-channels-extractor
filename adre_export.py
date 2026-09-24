@@ -3111,31 +3111,42 @@ def _step_handlers(app, job: ExportJob) -> dict[str, Callable[[dict[str, Any]], 
         )
 
     def split_static(step: dict[str, Any]) -> None:
-        """Per-channel split + rotor groups. Only after the static Tabular List CSV exists."""
-        from adre_split import split_export
+        """Per-channel split + rotor groups. Only after a real Tabular List is on disk.
+
+        ADRE often creates an empty export_static.csv at Save, then fills it later.
+        A stub file must not abort the rest of the recipe.
+        """
+        from adre_split import NotATabularExport, file_is_tabular, split_export
 
         named = step.get("path") or "{inbox}\\export_static.csv"
         target = Path(named.replace("{inbox}", str(job.inbox)))
-        timeout = float(step.get("timeout", 45))
+        timeout = float(step.get("timeout", 120))
         deadline = time.time() + timeout
         last_size = -1
         stable = 0
         while time.time() < deadline:
-            if target.is_file() and target.stat().st_size > 80:
-                size = target.stat().st_size
-                if size == last_size:
-                    stable += 1
-                    if stable >= 2:
-                        break
-                else:
-                    stable = 0
-                last_size = size
+            size = target.stat().st_size if target.is_file() else 0
+            if file_is_tabular(target) and size == last_size and size > 80:
+                stable += 1
+                if stable >= 3:
+                    break
+            else:
+                stable = 0
+            last_size = size
             time.sleep(0.5)
-        if not target.is_file():
-            print(f"[adre] split static skipped — {target.name} not extracted yet", flush=True)
+        if not file_is_tabular(target):
+            print(
+                f"[adre] split static skipped — {target.name} is not a Tabular List yet "
+                "(empty Save stub or still writing). Timebase export continues.",
+                flush=True,
+            )
             return
         dest = job.inbox.parent / "channels"
-        result = split_export(target, dest)
+        try:
+            result = split_export(target, dest)
+        except NotATabularExport as exc:
+            print(f"[adre] split static skipped — {exc}. Timebase export continues.", flush=True)
+            return
         print(
             f"[adre] split static {result.n_channels} channels → {result.groups_folder or dest}",
             flush=True,

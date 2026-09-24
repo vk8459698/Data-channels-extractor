@@ -76,6 +76,27 @@ class TestReadBlocks:
         with pytest.raises(NotATabularExport, match="not an ADRE Sxp Tabular List"):
             read_blocks(path)
 
+    def test_reads_tab_delimited_tabular_list(self, tmp_path: Path):
+        from adre_split import file_is_tabular
+
+        lines = ["", ""]
+        for sample_no in (1, 2):
+            for line in _block(sample_no):
+                lines.append(line.replace("|", "\t"))
+        path = tmp_path / "export_static.csv"
+        path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-16", newline="")
+        assert file_is_tabular(path)
+        _, meta, _, rows = read_blocks(path)
+        assert "BRG1X" in meta
+        assert len(rows["BRG1X"]) == 2
+
+    def test_empty_save_stub_is_not_tabular(self, tmp_path: Path):
+        from adre_split import file_is_tabular
+
+        path = tmp_path / "export_static.csv"
+        path.write_text("", encoding="utf-16")
+        assert not file_is_tabular(path)
+
 
 class TestSplit:
     def test_writes_one_file_per_channel_plus_a_single_config_table(self, export, tmp_path):
