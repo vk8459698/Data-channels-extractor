@@ -1161,7 +1161,10 @@ def _click_win32_popup(title: str) -> bool:
             continue
         try:
             for ctrl in pop.children():
-                if _item_text(ctrl) == title:
+                text = _item_text(ctrl)
+                if text == title or (
+                    title == "Configure" and _item_text_is_configure(text)
+                ):
                     print(f"[adre] menu {title!r} (win32)", flush=True)
                     ctrl.click_input()
                     return True
@@ -1348,12 +1351,44 @@ def _click_plot_export(session, contains: str | None = None) -> None:
 
 
 _PLOT_CONFIG_DIALOG = "Timebase Plot Group Configuration"
+_PLOT_CONFIG_TITLE_RE = re.compile(r"plot group configuration", re.I)
 _PLOT_CONTEXT_MARKERS = (
     "plotsession",
     "set sample as reference",
     "plot flagged data",
     "add plot",
 )
+
+
+def _item_text_is_configure(text: str) -> bool:
+    cleaned = (text or "").replace("&", "").strip().rstrip(".").strip().casefold()
+    return cleaned == "configure"
+
+
+def _is_plot_config_dialog_title(text: str) -> bool:
+    title = (text or "").strip()
+    if not title:
+        return False
+    if title == _PLOT_CONFIG_DIALOG:
+        return True
+    return bool(_PLOT_CONFIG_TITLE_RE.search(title))
+
+
+def _config_dialog_score(text: str, contains: str | None = None) -> int:
+    title = (text or "").strip()
+    if not _is_plot_config_dialog_title(title):
+        return 0
+    folded = title.casefold()
+    score = 1
+    if "timebase" in folded:
+        score += 2
+    if title == _PLOT_CONFIG_DIALOG:
+        score += 1
+    if contains and contains.casefold() in folded:
+        score += 2
+    elif contains:
+        return 0
+    return score
 
 
 def _click_combo_item(title: str, timeout: float = 1.5) -> bool:
@@ -1417,26 +1452,68 @@ def _click_dropdown_choice(title: str, root=None, timeout: float = 5) -> None:
     raise RecipeIncomplete(f"Dropdown item {title!r} not found")
 
 
-def _find_plot_config_dialog(adre=None, session=None, timeout: float = 12):
+def _iter_desktop_windows():
+    try:
+        from pywinauto import Desktop
+
+        yield from Desktop(backend="uia").windows()
+    except Exception:
+        return
+
+
+def _visible_window_titles() -> list[str]:
+    titles: list[str] = []
+    for win in _iter_desktop_windows():
+        try:
+            text = (win.window_text() or "").strip()
+        except Exception:
+            continue
+        if text and "Cursor" not in text:
+            titles.append(text)
+    return titles
+
+
+def _find_plot_config_dialog(
+    adre=None, session=None, timeout: float = 12, contains: str | None = None
+):
+    """Find Timebase (or any) Plot Group Configuration — title need not be exact."""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        best = None
+        best_score = 0
+        seen: set[int] = set()
+
+        def consider(win) -> None:
+            nonlocal best, best_score
+            try:
+                key = int(getattr(win, "handle", 0) or id(win))
+            except Exception:
+                key = id(win)
+            if key in seen:
+                return
+            seen.add(key)
+            try:
+                title = win.window_text() or ""
+            except Exception:
+                return
+            score = _config_dialog_score(title, contains)
+            if score > best_score:
+                best = win
+                best_score = score
+
         for root in (session, adre):
             if root is None:
                 continue
             try:
                 for child in root.children():
-                    if (child.window_text() or "") == _PLOT_CONFIG_DIALOG:
-                        return child
+                    consider(child)
             except Exception:
                 pass
-        try:
-            from pywinauto import Desktop
-
-            for win in Desktop(backend="uia").windows():
-                if (win.window_text() or "") == _PLOT_CONFIG_DIALOG:
-                    return win
-        except Exception:
-            pass
+        for win in _iter_desktop_windows():
+            consider(win)
+        if best is not None:
+            print(f"[adre] found config dialog {(best.window_text() or '').strip()!r}", flush=True)
+            return best
         time.sleep(0.25)
     return None
 
@@ -2331,17 +2408,46 @@ def _sync_leftover_cells(
     return leftover
 
 
-def _right_click_plot_canvas(session, contains: str | None = None) -> None:
-    """Right-click the Timebase waveform (not the HV toolbar)."""
+def _plot_click_points(group) -> list[tuple[int, int]]:
+    """Waveform interior points — skip the title strip and bottom Export toolbar."""
+    rect = group.rectangle()
+    left, top = int(rect.left), int(rect.top)
+    width = max(1, int(rect.right) - left)
+    height = max(1, int(rect.bottom) - top)
+    raw = (
+        (left + width // 2, top + int(height * 0.42)),
+        (left + int(width * 0.35), top + int(height * 0.50)),
+        (left + int(width * 0.65), top + int(height * 0.38)),
+        (left + width // 2, top + int(height * 0.28)),
+    )
+    return [
+        (max(left + 40, x), max(top + 50, min(y, top + height - 50)))
+        for x, y in raw
+    ]
+
+
+def _focus_plot_group(session, contains: str | None = None):
+    """Bring the Timebase plot to the front and left-click its waveform."""
     group = _plot_group_root(session, contains)
     _ensure_foreground(session, maximize=True)
     if group is not session:
         _maximize_ctrl(group)
         time.sleep(0.25)
         group = _plot_group_root(session, contains)
-    rect = group.rectangle()
-    x = int(rect.left) + max(60, (int(rect.right) - int(rect.left)) // 2)
-    y = int(rect.top) + max(70, int((int(rect.bottom) - int(rect.top)) * 0.38))
+    points = _plot_click_points(group)
+    x, y = points[0]
+    print(f"[adre] focus Timebase plot at ({x},{y})", flush=True)
+    try:
+        group.click_input(coords=(x, y), absolute=True)
+    except Exception:
+        from pywinauto.mouse import click
+
+        click(coords=(x, y))
+    time.sleep(0.3)
+    return group
+
+
+def _right_click_xy(group, x: int, y: int) -> None:
     print(f"[adre] right-click Timebase plot at ({x},{y})", flush=True)
     try:
         group.click_input(button="right", coords=(x, y), absolute=True)
@@ -2352,11 +2458,19 @@ def _right_click_plot_canvas(session, contains: str | None = None) -> None:
     time.sleep(0.35)
 
 
+def _right_click_plot_canvas(session, contains: str | None = None) -> None:
+    """Right-click the Timebase waveform (not the HV toolbar)."""
+    group = _focus_plot_group(session, contains)
+    x, y = _plot_click_points(group)[0]
+    _right_click_xy(group, x, y)
+
+
 def _click_plot_context_configure(timeout: float = 5) -> bool:
     """Configure on the plot right-click menu (PlotSession / Add Plot), not the gear."""
     from pywinauto import Desktop
 
     deadline = time.time() + timeout
+    seen_labels: list[str] = []
     while time.time() < deadline:
         for pop in Desktop(backend="uia").windows():
             text, cls, auto, kind = _window_meta(pop)
@@ -2366,11 +2480,15 @@ def _click_plot_context_configure(timeout: float = 5) -> bool:
                 kids = list(pop.children()) + list(pop.descendants())
             except Exception:
                 continue
-            blob = " ".join(_item_text(c).casefold() for c in kids)
-            if not any(marker in blob for marker in _PLOT_CONTEXT_MARKERS):
+            labels = [_item_text(c) for c in kids if _item_text(c)]
+            seen_labels.extend(labels)
+            blob = " ".join(label.casefold() for label in labels)
+            has_plot_markers = any(marker in blob for marker in _PLOT_CONTEXT_MARKERS)
+            is_menu = cls == "#32768" or "menu" in kind
+            if not has_plot_markers and not is_menu:
                 continue
             for ctrl in kids:
-                if _item_text(ctrl) != "Configure":
+                if not _item_text_is_configure(_item_text(ctrl)):
                     continue
                 if not _ctrl_visible(ctrl):
                     continue
@@ -2380,14 +2498,42 @@ def _click_plot_context_configure(timeout: float = 5) -> bool:
         if _click_win32_popup("Configure"):
             return True
         time.sleep(0.1)
+    if seen_labels:
+        uniq = list(dict.fromkeys(seen_labels))[:16]
+        print(f"[adre] plot context menu had {uniq}, no Configure", flush=True)
     return False
+
+
+def _click_plot_group_configure(session, group) -> bool:
+    """Configure on the plot-group chrome — not ADRE Edit or the HV replay row."""
+    hits = []
+    for root in (group, session):
+        if root is None:
+            continue
+        try:
+            nodes = list(root.descendants())
+        except Exception:
+            continue
+        for ctrl in nodes:
+            if not _item_text_is_configure(_item_text(ctrl)):
+                continue
+            if not _ctrl_visible(ctrl):
+                continue
+            if _in_hv_top_toolbar(ctrl):
+                continue
+            hits.append(ctrl)
+    if not hits:
+        return False
+    print("[adre] plot-group Configure", flush=True)
+    hits[0].click_input()
+    return True
 
 
 def _click_hv_configure(session) -> None:
     hits = [
         ctrl
         for ctrl in session.descendants()
-        if _item_text(ctrl) == "Configure"
+        if _item_text_is_configure(_item_text(ctrl))
         and _ctrl_visible(ctrl)
         and _in_hv_top_toolbar(ctrl)
     ]
@@ -2395,7 +2541,7 @@ def _click_hv_configure(session) -> None:
         hits = [
             ctrl
             for ctrl in session.descendants()
-            if _item_text(ctrl) == "Configure" and _ctrl_visible(ctrl)
+            if _item_text_is_configure(_item_text(ctrl)) and _ctrl_visible(ctrl)
         ]
     if not hits:
         raise RecipeIncomplete("Configure not found on HV - Plot Session")
@@ -2403,10 +2549,34 @@ def _click_hv_configure(session) -> None:
     hits[0].click_input()
 
 
+def _dismiss_wrong_config_dialog(dlg) -> None:
+    title = ""
+    try:
+        title = (dlg.window_text() or "").strip()
+    except Exception:
+        pass
+    print(f"[adre] closing unexpected config {title!r}", flush=True)
+    from pywinauto.keyboard import send_keys
+
+    try:
+        dlg.set_focus()
+    except Exception:
+        pass
+    send_keys("{ESC}")
+    time.sleep(0.35)
+
+
 def _open_timebase_configure(session, adre=None, contains: str | None = None):
-    dlg = _find_plot_config_dialog(adre=adre, session=session, timeout=1.5)
+    want = contains or "Timebase"
+    dlg = _find_plot_config_dialog(
+        adre=adre, session=session, timeout=1.5, contains=want
+    )
     if dlg is not None:
         return dlg
+    leftover = _find_plot_config_dialog(adre=adre, session=session, timeout=0.4)
+    if leftover is not None:
+        _dismiss_wrong_config_dialog(leftover)
+
     from pywinauto.keyboard import send_keys
 
     try:
@@ -2420,21 +2590,64 @@ def _open_timebase_configure(session, adre=None, contains: str | None = None):
         pass
     send_keys("{ESC}")
     time.sleep(0.2)
-    _right_click_plot_canvas(session, contains)
-    if _click_plot_context_configure():
-        dlg = _find_plot_config_dialog(adre=adre, session=session, timeout=8)
+    group = _focus_plot_group(session, want)
+
+    def _got_timebase() -> object | None:
+        found = _find_plot_config_dialog(
+            adre=adre, session=session, timeout=8, contains=want
+        )
+        if found is not None:
+            return found
+        other = _find_plot_config_dialog(adre=adre, session=session, timeout=0.6)
+        if other is not None:
+            _dismiss_wrong_config_dialog(other)
+        return None
+
+    for x, y in _plot_click_points(group):
+        _right_click_xy(group, x, y)
+        if _click_plot_context_configure(timeout=3.5):
+            dlg = _got_timebase()
+            if dlg is not None:
+                return dlg
+        send_keys("{ESC}")
+        time.sleep(0.15)
+        group = _plot_group_root(session, want)
+
+    try:
+        group.set_focus()
+    except Exception:
+        pass
+    send_keys("+{F10}")
+    time.sleep(0.35)
+    if _click_plot_context_configure(timeout=3.5):
+        dlg = _got_timebase()
         if dlg is not None:
             return dlg
     send_keys("{ESC}")
     time.sleep(0.2)
-    _click_hv_configure(session)
-    dlg = _find_plot_config_dialog(adre=adre, session=session, timeout=8)
-    if dlg is None:
-        raise RecipeIncomplete(
-            "Timebase Plot Group Configuration did not open. "
-            "Right-click the Timebase plot → Configure."
-        )
-    return dlg
+
+    if _click_plot_group_configure(session, group):
+        dlg = _got_timebase()
+        if dlg is not None:
+            return dlg
+        send_keys("{ESC}")
+        time.sleep(0.2)
+
+    try:
+        _click_hv_configure(session)
+    except RecipeIncomplete:
+        pass
+    else:
+        dlg = _got_timebase()
+        if dlg is not None:
+            return dlg
+
+    titles = _visible_window_titles()
+    raise RecipeIncomplete(
+        "Timebase Plot Group Configuration did not open. "
+        "Right-click the Timebase plot → Configure. "
+        f"Visible windows: {titles[:12]}"
+    )
 
 
 def _win32_window(uia_window):

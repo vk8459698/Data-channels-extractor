@@ -378,3 +378,37 @@ class TestZipPipeline:
         monkeypatch.setattr(pipe, "_PROJECT_ROOT", tmp_path)
         assert pipe.resolve_user_path("job_from_project.zip") == archive
 
+
+def test_plot_config_dialog_title_match():
+    from adre_export import (
+        _config_dialog_score,
+        _is_plot_config_dialog_title,
+        _item_text_is_configure,
+        _plot_click_points,
+    )
+
+    assert _is_plot_config_dialog_title("Timebase Plot Group Configuration")
+    assert _is_plot_config_dialog_title("Tabular List Plot Group Configuration")
+    assert not _is_plot_config_dialog_title("HV - Plot Session")
+    assert _config_dialog_score("Timebase Plot Group Configuration", "Timebase") > (
+        _config_dialog_score("Tabular List Plot Group Configuration")
+    )
+    assert _config_dialog_score("Tabular List Plot Group Configuration", "Timebase") == 0
+    assert _item_text_is_configure("Configure")
+    assert _item_text_is_configure("&Configure")
+    assert _item_text_is_configure("Configure...")
+    assert not _item_text_is_configure("Configuration Hierarchy")
+
+    class Rect:
+        left, top, right, bottom = 100, 80, 900, 680
+
+    class Group:
+        def rectangle(self):
+            return Rect()
+
+    points = _plot_click_points(Group())
+    assert len(points) >= 3
+    for x, y in points:
+        assert 140 <= x <= 860
+        assert 130 <= y <= 630
+
