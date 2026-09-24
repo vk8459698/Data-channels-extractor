@@ -66,6 +66,11 @@
       "note": "Static export write"
     },
     {
+      "action": "split_static",
+      "path": "{inbox}\\export_static.csv",
+      "note": "Split and group rotors only after static Tabular List is extracted"
+    },
+    {
       "action": "select_sampling_cards",
       "title_re": "^ADRE",
       "card_name": "Dynamic Sampling Card",

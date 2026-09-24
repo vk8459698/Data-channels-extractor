@@ -12,7 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from pipeline import PipelineError, process
+from pipeline import PipelineError, process, resolve_user_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 
     exit_code = 0
     for raw in args.inputs:
-        path = Path(raw)
+        path = resolve_user_path(raw)
         if not path.exists():
             print(f"{path}: no such file", file=sys.stderr)
             exit_code = 2

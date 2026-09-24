@@ -18,8 +18,9 @@ from adre_split import (  # noqa: E402
     read_blocks,
     safe_filename,
     split_export,
+    write_groups,
 )
-from pipeline import PipelineError, process  # noqa: E402
+from pipeline import PipelineError, process, resolve_user_path  # noqa: E402
 
 META = "CH#|Channel Name|Machine Name|Status|Angle|Direction|Speed Units(P)|Amp Unit|Phase Unit|"
 SAMPLE = (
@@ -306,6 +307,21 @@ class TestGroups:
         assert names["thrust"] == {"THRUST A-LP9.csv"}
         assert (tmp_path / "groups" / "manifest.csv").is_file()
 
+    def test_separate_rotors_when_machine_names_differ(self, tmp_path):
+        gt = tmp_path / "BRG1X.csv"
+        st = tmp_path / "BRG3X.csv"
+        gt.write_text("x", encoding="utf-8")
+        st.write_text("x", encoding="utf-8")
+        groups = write_groups(
+            [gt, st],
+            tmp_path / "groups",
+            machines={gt: "GAS TURBINE", st: "GENERATOR"},
+        )
+        assert (tmp_path / "groups" / "GAS TURBINE" / "rotor" / "BRG1X.csv").is_file()
+        assert (tmp_path / "groups" / "GENERATOR" / "rotor" / "BRG3X.csv").is_file()
+        assert "GAS TURBINE/rotor" in groups
+        assert "GENERATOR/rotor" in groups
+
 
 class TestZipPipeline:
     def test_zip_of_a_tabular_export_is_split_and_grouped(self, tagged, tmp_path):
@@ -332,4 +348,12 @@ class TestZipPipeline:
             zf.write(db / "ConfigDBFile.xml", "ConfigDBFile.xml")
         with pytest.raises(PipelineError, match="--adre"):
             process(archive, tmp_path / "out")
+
+    def test_bare_zip_name_resolves_from_project_folder(self, tmp_path, monkeypatch):
+        import pipeline as pipe
+
+        archive = tmp_path / "job_from_project.zip"
+        archive.write_bytes(b"PK\x03\x04")
+        monkeypatch.setattr(pipe, "_PROJECT_ROOT", tmp_path)
+        assert pipe.resolve_user_path("job_from_project.zip") == archive
 

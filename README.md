@@ -55,6 +55,10 @@ This tool:
 2. Splits the Tabular List into one file per channel, config row once.
 3. Names bearing probes for plotting.
 4. Copies them into **rotor / casing / thrust** groups the website accepts.
+   Separate machines (Gas Turbine, Compressor, Generator) get their own rotor folders.
+5. With `--adre`, the per-channel split runs **right after** `export_static.csv` is written — not before, and not on sync/async timebase files.
+
+A zip named on the command line (`python main.py 3_GE_7HA.zip --adre`) is loaded from this folder, or from a sibling `RotorDyn` folder.
 
 Cell text is copied verbatim, including vendor status codes such as `228BMA`.
 

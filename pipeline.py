@@ -15,10 +15,29 @@ from pathlib import Path
 from adre_split import NotATabularExport, is_tabular_export, read_lines, split_export
 
 MAX_ZIP_UNCOMPRESSED = 80 * 1024 * 1024 * 1024
+_PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 class PipelineError(RuntimeError):
     """The input was not a usable export or ADRE database."""
+
+
+def resolve_user_path(raw: str | Path) -> Path:
+    """Find a zip/CSV named on the command line.
+
+    Bare names (``3_GE_7HA.zip``) are taken from this extractor folder, then
+    the sibling RotorDyn folder — that is where the operator drops the zip.
+    """
+    path = Path(raw).expanduser()
+    search: list[Path] = []
+    if not path.is_absolute() and len(path.parts) == 1:
+        search.append(_PROJECT_ROOT / path.name)
+        search.append(_PROJECT_ROOT.parent / "RotorDyn" / path.name)
+    search.extend((path, _PROJECT_ROOT / path, _PROJECT_ROOT / path.name))
+    for candidate in search:
+        if candidate.exists():
+            return candidate
+    return path
 
 
 def _looks_like_zip(path: Path) -> bool:
@@ -115,7 +134,7 @@ def process(
     run_adre: bool = False,
 ):
     """Extract (if needed), split, and group. Returns a list of SplitResult."""
-    source = Path(source)
+    source = resolve_user_path(source)
     if not source.exists():
         raise FileNotFoundError(source)
 

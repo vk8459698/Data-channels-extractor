@@ -184,39 +184,64 @@ def channel_group(name: str) -> str:
     return "other"
 
 
+def _machine_label(meta_header: list[str], meta_row: list[str]) -> str:
+    try:
+        return (meta_row[meta_header.index("Machine Name")] or "").strip()
+    except (ValueError, IndexError):
+        return ""
+
+
 def write_groups(
     channel_files: Iterable[Path],
     folder: str | Path,
+    machines: dict[Path, str] | None = None,
 ) -> dict[str, list[Path]]:
-    """Copy channel files into ``rotor`` / ``casing`` / ``thrust`` upload folders."""
+    """Copy channels into upload folders. Separate rotor trains when Machine Name differs."""
     import shutil
 
     folder = Path(folder)
-    grouped: dict[str, list[Path]] = {name: [] for name in GROUP_ORDER}
-    for source in channel_files:
-        if source.name.casefold() == "channels.csv":
-            continue
-        group = channel_group(source.stem)
-        dest_dir = folder / group
+    machines = machines or {}
+    files = [p for p in channel_files if p.name.casefold() != "channels.csv"]
+    rotor_machines = {
+        (machines.get(path) or "").strip()
+        for path in files
+        if channel_group(path.stem) == "rotor"
+    }
+    rotor_machines.discard("")
+    split_rotors = len(rotor_machines) > 1
+    grouped: dict[str, list[Path]] = {}
+    notes = {
+        "rotor": "proximity XY pairs + keyphasor (Trend, Polar, Orbit, Centerline)",
+        "casing": "seismic / casing probes",
+        "thrust": "thrust position / load",
+        "other": "anything that did not match the tags above",
+    }
+    for source in files:
+        kind = channel_group(source.stem)
+        machine = (machines.get(source) or "").strip()
+        if split_rotors and machine:
+            dest_dir = folder / safe_filename(machine) / kind
+            key = f"{safe_filename(machine)}/{kind}"
+        else:
+            dest_dir = folder / kind
+            key = kind
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / source.name
         shutil.copy2(source, dest)
-        grouped[group].append(dest)
+        grouped.setdefault(key, []).append(dest)
 
     manifest = folder / "manifest.csv"
     with manifest.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["Group", "File", "Upload together"])
-        notes = {
-            "rotor": "proximity XY pairs + keyphasor (Trend, Polar, Orbit, Centerline)",
-            "casing": "seismic / casing probes",
-            "thrust": "thrust position / load",
-            "other": "anything that did not match the tags above",
-        }
-        for group in GROUP_ORDER:
-            for path in grouped[group]:
-                writer.writerow([group, path.name, notes[group]])
-    return {name: files for name, files in grouped.items() if files}
+        writer.writerow(["Machine", "Group", "File", "Upload together"])
+        for key, paths in grouped.items():
+            if "/" in key:
+                machine, kind = key.split("/", 1)
+            else:
+                machine, kind = "", key
+            for path in paths:
+                writer.writerow([machine, kind, path.name, notes.get(kind, "")])
+    return grouped
 
 
 def _renamed(cells: list[str], index: int, name: str) -> list[str]:
@@ -395,7 +420,11 @@ def split_export(
     groups_folder = folder.parent / "groups"
     groups: dict[str, list[Path]] = {}
     if write_upload_groups and written:
-        groups = write_groups(written, groups_folder)
+        machines = {
+            target: _machine_label(meta_header, meta_by_channel.get(name, []))
+            for target, (name, _rows) in zip(written, rows_by_channel.items())
+        }
+        groups = write_groups(written, groups_folder, machines=machines)
     return SplitResult(
         source=source,
         folder=folder,

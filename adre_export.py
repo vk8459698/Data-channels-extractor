@@ -18,9 +18,26 @@ import os
 import re
 import subprocess
 import time
+from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+_IDC_SIZENS = 32645
+_IDC_SIZEWE = 32644
+_MOUSEEVENTF_LEFTDOWN = 0x0002
+_MOUSEEVENTF_LEFTUP = 0x0004
+
+
+def _enable_dpi_awareness() -> None:
+    """UIA rectangles and SetCursorPos only match after the process is DPI-aware."""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 # Common install locations / executable names seen with Bently Nevada tools.
 _ADRE_DIR_CANDIDATES = (
@@ -791,6 +808,17 @@ def _is_sync_waveform_label(val: str) -> bool:
     return text == "sync waveform" or text.endswith("sync waveform")
 
 
+def _combo_item_is_choice(text: str, title: str) -> bool:
+    """Exact list row only — not '#2 Async Waveform' or '#3 Async Waveform'."""
+    got = (text or "").strip()
+    want = (title or "").strip()
+    if not got or not want:
+        return False
+    if got[:1] == "#":
+        return False
+    return got.casefold() == want.casefold()
+
+
 def _plot_variable_column(
     cells: dict[tuple[int, int], tuple[str, object]],
 ) -> int | None:
@@ -1340,12 +1368,20 @@ def _click_combo_item(title: str, timeout: float = 1.5) -> bool:
             pops = []
         for pop in pops:
             try:
+                rect = pop.rectangle()
+                height = int(rect.bottom) - int(rect.top)
+                width = int(rect.right) - int(rect.left)
+            except Exception:
+                continue
+            if height > 420 or width > 700:
+                continue
+            try:
                 nodes = list(pop.children()) + list(pop.descendants())
             except Exception:
                 continue
             for ctrl in nodes:
                 text = _item_text(ctrl)
-                if text != title:
+                if not _combo_item_is_choice(text, title):
                     continue
                 if _FLEX_CELL.fullmatch(text or ""):
                     continue
@@ -1365,7 +1401,7 @@ def _click_combo_item(title: str, timeout: float = 1.5) -> bool:
                     (int(rect.top) + int(rect.bottom)) // 2,
                 )
                 return True
-        time.sleep(0.08)
+        time.sleep(0.04)
     return False
 
 
@@ -1403,6 +1439,399 @@ def _find_plot_config_dialog(adre=None, session=None, timeout: float = 12):
             pass
         time.sleep(0.25)
     return None
+
+
+def _config_splitter_target_y(top: int, bottom: int) -> int:
+    """Y for a fully lowered gripper — just above the OK row."""
+    height = max(1, int(bottom) - int(top))
+    return int(top) + int(height * 0.92)
+
+
+def _union_rect(rects: list) -> object | None:
+    if not rects:
+        return None
+
+    class _R:
+        pass
+
+    box = _R()
+    box.left = min(int(r.left) for r in rects)
+    box.top = min(int(r.top) for r in rects)
+    box.right = max(int(r.right) for r in rects)
+    box.bottom = max(int(r.bottom) for r in rects)
+    return box
+
+
+def _flexgrid_bounds(dlg):
+    """Union of every Row/Column cell — includes the lower property list too."""
+    return _cells_bounds(_flexgrid_cells(dlg))
+
+
+def _cells_bounds(cells: dict) -> object | None:
+    rects = []
+    for _key, (_val, ctrl) in cells.items():
+        if ctrl is None:
+            continue
+        rect = _cell_rect(ctrl)
+        if rect is not None:
+            rects.append(rect)
+    return _union_rect(rects)
+
+
+def _channel_grid_cells(cells: dict) -> dict:
+    """Upper Timebase channel FlexGrid only (many columns). Not the 2-col options list."""
+    if not cells:
+        return {}
+    max_col = max(col for _row, col in cells)
+    if max_col >= 3:
+        return {key: val for key, val in cells.items() if key[1] >= 2}
+    return cells
+
+
+def _channel_grid_bounds(dlg):
+    return _cells_bounds(_channel_grid_cells(_flexgrid_cells(dlg)))
+
+
+def _win32_child_bars(dlg) -> list[tuple[int, int, int, int, str]]:
+    """Child HWNDs that look like a horizontal splitter (wide, few pixels tall)."""
+    try:
+        hwnd = int(dlg.handle)
+    except Exception:
+        return []
+    user32 = ctypes.windll.user32
+    found: list[tuple[int, int, int, int, str]] = []
+    buf = ctypes.create_unicode_buffer(256)
+    wnd_enum = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def _cb(child, _lp):
+        user32.GetClassNameW(child, buf, 256)
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(child, ctypes.byref(rect)):
+            return True
+        width, height = rect.right - rect.left, rect.bottom - rect.top
+        cls = buf.value
+        name = cls.upper()
+        thin = width > max(height * 4, 200) and 1 <= height <= 20
+        named = "SPLITTER" in name or "SPLITCONTAINER" in name
+        if thin or named:
+            mid_y = (rect.top + rect.bottom) // 2
+            found.append((mid_y, width, height, (rect.left + rect.right) // 2, cls))
+        return True
+
+    cb = wnd_enum(_cb)
+    user32.EnumChildWindows(hwnd, cb, 0)
+    return found
+
+
+def _win32_horizontal_splitter_y(dlg) -> int | None:
+    """Native splitter HWND — UIA often never sees this gripper."""
+    bars = _win32_child_bars(dlg)
+    if not bars:
+        return None
+    return int(sorted(bars, key=lambda row: row[2])[0][0])
+
+
+def _cursor_is(idc: int) -> bool:
+    class CURSORINFO(ctypes.Structure):
+        _fields_ = (
+            ("cbSize", wintypes.DWORD),
+            ("flags", wintypes.DWORD),
+            ("hCursor", wintypes.HANDLE),
+            ("ptScreenPos", wintypes.POINT),
+        )
+
+    info = CURSORINFO()
+    info.cbSize = ctypes.sizeof(CURSORINFO)
+    if not ctypes.windll.user32.GetCursorInfo(ctypes.byref(info)):
+        return False
+    loaded = ctypes.windll.user32.LoadCursorW(None, idc)
+    return int(info.hCursor or 0) == int(loaded or 0)
+
+
+def _move_cursor(x: int, y: int) -> None:
+    ctypes.windll.user32.SetCursorPos(int(x), int(y))
+
+
+def _hunt_cursor(xs: list[int], ys: list[int], idc: int) -> tuple[int, int] | None:
+    """Hover until Windows shows the resize cursor — that pixel is the gripper."""
+    seen: set[tuple[int, int]] = set()
+    for y in ys:
+        for x in xs:
+            pt = (int(x), int(y))
+            if pt in seen:
+                continue
+            seen.add(pt)
+            _move_cursor(pt[0], pt[1])
+            time.sleep(0.05)
+            if _cursor_is(idc):
+                return pt
+    return None
+
+
+_OPTION_PANE_MARKERS = (
+    "scaling",
+    "dccoupled",
+    "dc coupled",
+    "plotresolution",
+    "plot resolution",
+    "wrappedtimebase",
+    "nameoffield",
+    "name of field",
+    "cursors",
+    "headers",
+)
+
+
+def _options_pane_top(dlg, host) -> int | None:
+    """Top of the lower property list (Scaling / Name / DC Coupled)."""
+    if host is None:
+        return None
+    floor = int(host.top) + int((int(host.bottom) - int(host.top)) * 0.22)
+    best = None
+    try:
+        nodes = list(dlg.descendants())
+    except Exception:
+        return None
+    for ctrl in nodes:
+        text = ((_item_text(ctrl) or "") + " " + (_legacy_value(ctrl) or "")).casefold()
+        compact = text.replace(" ", "")
+        if not any(marker.replace(" ", "") in compact for marker in _OPTION_PANE_MARKERS):
+            continue
+        rect = _cell_rect(ctrl)
+        if rect is None or int(rect.top) < floor:
+            continue
+        top = int(rect.top)
+        if best is None or top < best:
+            best = top
+    return best
+
+
+def _config_splitter_y(dlg, host) -> int | None:
+    """Pixel row of the bar between the channel FlexGrid and the options list."""
+    native = _win32_horizontal_splitter_y(dlg)
+    if native is not None:
+        return native
+    grid = _channel_grid_bounds(dlg)
+    options_top = _options_pane_top(dlg, host)
+    if grid is not None and options_top is not None:
+        gap = options_top - int(grid.bottom)
+        if -20 <= gap <= 120:
+            return int(grid.bottom) + max(3, min(8, gap // 2))
+    if grid is not None:
+        return int(grid.bottom) + 4
+    if options_top is not None:
+        return options_top - 4
+    return None
+
+
+def _drag_xy(x0: int, y0: int, x1: int, y1: int) -> None:
+    """Hold-and-slide via SetCursorPos. pywinauto press/move often never captures WinForms."""
+    user32 = ctypes.windll.user32
+    x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+    _move_cursor(x0, y0)
+    time.sleep(0.05)
+    user32.mouse_event(_MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.04)
+    _move_cursor(x0, y0 + 2)
+    steps = 8
+    for i in range(1, steps + 1):
+        _move_cursor(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps)
+        time.sleep(0.01)
+    user32.mouse_event(_MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    time.sleep(0.08)
+
+
+def _splitter_score(ctrl, host) -> float:
+    """Higher = more like the horizontal SplitContainer bar."""
+    rect = _cell_rect(ctrl)
+    if rect is None or host is None:
+        return -1.0
+    width = int(rect.right) - int(rect.left)
+    height = int(rect.bottom) - int(rect.top)
+    host_w = int(host.right) - int(host.left)
+    host_h = int(host.bottom) - int(host.top)
+    if width < 40 or height < 2 or height > 28:
+        return -1.0
+    if host_w > 0 and width < host_w * 0.45:
+        return -1.0
+    auto = str(getattr(getattr(ctrl, "element_info", None), "automation_id", "") or "").lower()
+    kind = (ctrl.friendly_class_name() or "").lower()
+    name = (_item_text(ctrl) or "").lower()
+    score = 1.0 + (width / max(host_w, 1.0))
+    if any(token in auto for token in ("splitter", "splitcontainer", "split")):
+        score += 8.0
+    if any(token in kind for token in ("splitter", "thumb", "gripper")):
+        score += 6.0
+    if "splitter" in name:
+        score += 4.0
+    mid = (int(rect.top) + int(rect.bottom)) / 2
+    if host_h > 0:
+        frac = (mid - int(host.top)) / host_h
+        if 0.25 <= frac <= 0.85:
+            score += 2.0
+        if frac < 0.12 or frac > 0.92:
+            score -= 4.0
+    return score
+
+
+def _find_config_splitter(dlg):
+    host = _cell_rect(dlg)
+    best = None
+    best_score = 2.5
+    try:
+        nodes = list(dlg.descendants()) + list(dlg.children())
+    except Exception:
+        return None
+    for ctrl in nodes:
+        score = _splitter_score(ctrl, host)
+        if score > best_score:
+            best_score = score
+            best = ctrl
+    return best
+
+
+def _config_splitter_candidates(dlg, host) -> tuple[int, str, list[int]]:
+    """Best guess Y plus nearby rows to hover for the SizeNS cursor."""
+    grid = _channel_grid_bounds(dlg)
+    options_top = _options_pane_top(dlg, host)
+    bars = _win32_child_bars(dlg)
+    ys: list[int] = []
+    source = "scan"
+    start_y = None
+    if bars:
+        start_y = int(sorted(bars, key=lambda row: row[2])[0][0])
+        source = "win32 bar"
+        ys.append(start_y)
+    if grid is not None and options_top is not None:
+        seam = (int(grid.bottom) + int(options_top)) // 2
+        if start_y is None:
+            start_y, source = seam, "grid/options seam"
+        ys.extend(range(int(grid.bottom) - 1, int(options_top) + 3))
+    elif grid is not None:
+        if start_y is None:
+            start_y, source = int(grid.bottom) + 2, "channel-grid bottom"
+        ys.extend(range(int(grid.bottom) - 1, int(grid.bottom) + 14))
+    elif options_top is not None:
+        if start_y is None:
+            start_y, source = options_top - 3, "options-pane top"
+        ys.extend(range(options_top - 12, options_top + 2))
+    if start_y is None:
+        splitter = _find_config_splitter(dlg)
+        rect = _cell_rect(splitter) if splitter is not None else None
+        if rect is not None:
+            start_y = (int(rect.top) + int(rect.bottom)) // 2
+            source = "uia splitter"
+            ys.append(start_y)
+    if start_y is None:
+        start_y = (int(host.top) + int(host.bottom)) // 2
+        source = "dialog mid"
+    mid = (int(host.top) + int(host.bottom)) // 2
+    ys.extend(range(mid - 40, mid + 41, 4))
+    # unique, keep order
+    ordered: list[int] = []
+    for y in [start_y, *ys]:
+        if y not in ordered:
+            ordered.append(int(y))
+    return int(start_y), source, ordered
+
+
+def _widen_options_name_column(dlg) -> None:
+    """Property-grid Name column is crushed (Nameoffield). Drag its vertical bar right."""
+    host = _cell_rect(dlg)
+    if host is None:
+        return
+    cells = _flexgrid_cells(dlg)
+    floor = int(host.top) + int((int(host.bottom) - int(host.top)) * 0.35)
+    rights: list[int] = []
+    tops: list[int] = []
+    bottoms: list[int] = []
+    for (row, col), (_val, ctrl) in cells.items():
+        if col != 0 or ctrl is None:
+            continue
+        rect = _cell_rect(ctrl)
+        if rect is None or int(rect.top) < floor:
+            continue
+        rights.append(int(rect.right))
+        tops.append(int(rect.top))
+        bottoms.append(int(rect.bottom))
+    if not rights:
+        return
+    grab_x = max(rights)
+    grab_y = (min(tops) + max(bottoms)) // 2
+    target_x = min(int(host.left) + 280, int(host.right) - 360)
+    if target_x <= grab_x + 20:
+        return
+    xs = [grab_x - 2, grab_x, grab_x + 2, grab_x + 4]
+    hit = _hunt_cursor(xs, [grab_y, grab_y + 18, grab_y - 18], _IDC_SIZEWE)
+    if hit is None:
+        hit = (grab_x, grab_y)
+    print(f"[adre] widen options Name column ({hit[0]} → {target_x})", flush=True)
+    _drag_xy(hit[0], hit[1], target_x, hit[1])
+
+
+def _lower_config_splitter(dlg) -> bool:
+    """Drag the bar all the way down, just above OK, so the lower grid half is visible."""
+    _enable_dpi_awareness()
+    _ensure_foreground(dlg)
+    host = _cell_rect(dlg)
+    if host is None:
+        return False
+    options = _options_pane_top(dlg, host)
+    native = _win32_horizontal_splitter_y(dlg)
+    mid = (int(host.top) + int(host.bottom)) // 2
+    if options is not None:
+        start_y = int(options) - 4
+    elif native is not None and int(host.top) + 80 < native < int(host.bottom) - 80:
+        start_y = native
+    else:
+        start_y = mid
+    target_y = int(host.bottom) - 52
+    grab_x = int(host.left) + 72
+    print(f"[adre] lower config splitter completely ({start_y} → {target_y})", flush=True)
+    _drag_xy(grab_x, start_y, grab_x, target_y)
+    after = _win32_horizontal_splitter_y(dlg)
+    if after is not None and after < target_y - 50:
+        print(f"[adre] splitter still high at {after}; second drag", flush=True)
+        _drag_xy(grab_x, after, grab_x, target_y)
+    return True
+
+
+def _click_lower_option(dlg, *markers: str) -> bool:
+    """Click a row in the lower options pane (Select All, Scaling, …)."""
+    host = _cell_rect(dlg)
+    if host is None:
+        return False
+    floor = int(host.top) + int((int(host.bottom) - int(host.top)) * 0.30)
+    wants = [m.replace(" ", "") for m in markers]
+    try:
+        nodes = list(dlg.descendants())
+    except Exception:
+        return False
+    for ctrl in nodes:
+        compact = (
+            ((_item_text(ctrl) or "") + " " + (_legacy_value(ctrl) or "")).casefold().replace(" ", "")
+        )
+        if not any(want in compact for want in wants):
+            continue
+        rect = _cell_rect(ctrl)
+        if rect is None or int(rect.top) < floor:
+            continue
+        x = int(rect.right) + 24 if int(rect.right) - int(rect.left) < 180 else (
+            int(rect.left) + int(rect.right)
+        ) // 2
+        y = (int(rect.top) + int(rect.bottom)) // 2
+        print(f"[adre] click lower option {markers[0]!r} at ({x},{y})", flush=True)
+        _mouse_click_xy(x, y)
+        time.sleep(0.08)
+        return True
+    return False
+
+
+def _select_lower_half_options(dlg) -> None:
+    """Select All in the lower pane so the other half of the grid is included."""
+    if _click_lower_option(dlg, "select all", "selectall"):
+        return
+    print("[adre] Select All not found in lower options", flush=True)
 
 
 def _expand_dialog_trees(dlg) -> None:
@@ -1458,34 +1887,199 @@ def _mouse_click_xy(x: int, y: int) -> None:
     mouse_click(coords=(int(x), int(y)))
 
 
-def _click_cell_dropdown(ctrl) -> bool:
-    """Click only the combo arrow (far right)."""
+def _variable_col_span(cells: dict, col: int | None) -> tuple[int, int] | None:
+    """Left/right of the Variable column. Prefer a narrow cell — some UIA rects are the whole row."""
+    if col is None:
+        return None
+    widths: list[tuple[int, int, int]] = []
+    for (row, c), (_val, ctrl) in cells.items():
+        if c != col or ctrl is None:
+            continue
+        rect = _cell_rect(ctrl)
+        if rect is None:
+            continue
+        width = int(rect.right) - int(rect.left)
+        if width < 16:
+            continue
+        widths.append((width, int(rect.left), int(rect.right)))
+    if not widths:
+        return None
+    widths.sort()
+    _w, left, right = widths[0]
+    if right - left > 420:
+        return None
+    return left, right
+
+
+def _click_cell_dropdown(ctrl, col_span: tuple[int, int] | None = None) -> bool:
+    """Click the Variable combo arrow, not the Name cell."""
     rect = _cell_rect(ctrl)
     if rect is None:
         return False
-    width = int(rect.right) - int(rect.left)
-    if width < 16:
-        return False
-    x = int(rect.right) - 4
     y = (int(rect.top) + int(rect.bottom)) // 2
+    if col_span is not None:
+        x = int(col_span[1]) - 4
+    else:
+        width = int(rect.right) - int(rect.left)
+        if width < 16:
+            return False
+        x = int(rect.right) - 4
     _mouse_click_xy(x, y)
     return True
 
 
-def _click_cell_body(ctrl) -> bool:
-    """Click the cell face, not the combo arrow — that is the selection anchor."""
+def _click_cell_body(ctrl, col_span: tuple[int, int] | None = None) -> bool:
+    """Click the Variable cell face so the combo attaches to this row."""
     rect = _cell_rect(ctrl)
     if rect is None:
         return False
-    width = int(rect.right) - int(rect.left)
-    x = int(rect.left) + min(28, max(10, width // 3))
     y = (int(rect.top) + int(rect.bottom)) // 2
+    if col_span is not None:
+        left, right = col_span
+        x = left + max(12, (right - left) // 3)
+    else:
+        width = int(rect.right) - int(rect.left)
+        x = int(rect.left) + min(28, max(10, width // 3))
     _mouse_click_xy(x, y)
     return True
+
+
+def _rect_in_box(rect, box, *, pad_top: int = 4, pad_bottom: int = 10) -> bool:
+    if rect is None or box is None:
+        return False
+    return (
+        int(rect.top) >= int(box.top) + pad_top
+        and int(rect.bottom) <= int(box.bottom) - pad_bottom
+    )
+
+
+def _grid_viewport(dlg):
+    """Visible channel-grid strip — above the splitter, not the whole dialog."""
+    host = _cell_rect(dlg)
+    if host is None:
+        return None
+
+    class _R:
+        pass
+
+    box = _R()
+    box.left = int(host.left)
+    box.right = int(host.right)
+    box.top = int(host.top) + 32
+    bottom = int(host.bottom) - 48
+    split = _config_splitter_y(dlg, host)
+    options = _options_pane_top(dlg, host)
+    grid = _channel_grid_bounds(dlg)
+    if split is not None:
+        bottom = min(bottom, int(split) - 2)
+    if options is not None:
+        bottom = min(bottom, int(options) - 2)
+    if grid is not None:
+        box.left = int(grid.left)
+        box.right = int(grid.right)
+        box.top = max(box.top, int(grid.top))
+    box.bottom = max(box.top + 40, bottom)
+    return box
+
+
+def _grid_wheel_point(dlg) -> tuple[int, int] | None:
+    """Left side of the channel grid (Name column) — never the Variable combo."""
+    box = _grid_viewport(dlg)
+    if box is None:
+        return None
+    return (int(box.left) + 36, (int(box.top) + int(box.bottom)) // 2)
+
+
+def _win32_vscrollbars(dlg) -> list[tuple[int, int, int, int]]:
+    """Vertical scrollbar HWNDs as (left, top, right, bottom)."""
+    try:
+        hwnd = int(dlg.handle)
+    except Exception:
+        return []
+    user32 = ctypes.windll.user32
+    found: list[tuple[int, int, int, int]] = []
+    buf = ctypes.create_unicode_buffer(256)
+    wnd_enum = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def _cb(child, _lp):
+        user32.GetClassNameW(child, buf, 256)
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(child, ctypes.byref(rect)):
+            return True
+        width, height = rect.right - rect.left, rect.bottom - rect.top
+        name = buf.value.upper()
+        thin = 8 <= width <= 28 and height > 60
+        named = "SCROLL" in name
+        if thin or (named and height > width * 2):
+            found.append((int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)))
+        return True
+
+    cb = wnd_enum(_cb)
+    user32.EnumChildWindows(hwnd, cb, 0)
+    return found
+
+
+def _focus_channel_grid(dlg) -> None:
+    """Click the Name column only. A Variable click opens the combo widget."""
+    box = _grid_viewport(dlg)
+    if box is None:
+        return
+    _mouse_click_xy(int(box.left) + 20, (int(box.top) + int(box.bottom)) // 2)
+    time.sleep(0.08)
+
+
+def _last_channel_cell(dlg):
+    cells = _channel_grid_cells(_flexgrid_cells(dlg))
+    if not cells:
+        return None
+    last_row = max(row for row, _col in cells)
+    for col in sorted({c for r, c in cells if r == last_row}, reverse=True):
+        _val, ctrl = cells[(last_row, col)]
+        if ctrl is not None:
+            return ctrl
+    return None
+
+
+def _scroll_channel_grid_to_bottom(dlg) -> None:
+    """Bring the last channel row fully above the splitter.
+
+    Never send PageDown / Ctrl+End — those scroll an open Variable combo.
+    Close any dropdown first, then wheel the Name column.
+    """
+    print("[adre] scroll channel grid to bottom", flush=True)
+    _dismiss_variable_combo(dlg)
+    _focus_channel_grid(dlg)
+    view = _grid_viewport(dlg)
+    bars = _win32_vscrollbars(dlg)
+    if view is not None and bars:
+        mid_y = (int(view.top) + int(view.bottom)) // 2
+        for left, top, right, bottom in bars:
+            bar_mid = (top + bottom) // 2
+            if abs(bar_mid - mid_y) > max(80, (int(view.bottom) - int(view.top))):
+                continue
+            sx = (left + right) // 2
+            print(f"[adre] drag grid scrollbar to bottom ({sx},{bar_mid} → {bottom - 10})", flush=True)
+            _drag_xy(sx, bar_mid, sx, bottom - 10)
+            break
+    pt = _grid_wheel_point(dlg)
+    last = _last_channel_cell(dlg)
+    if pt is not None:
+        try:
+            from pywinauto.mouse import scroll
+        except Exception:
+            scroll = None
+        for _ in range(36):
+            if last is not None and _cell_on_screen(last, dlg):
+                break
+            if scroll is not None:
+                scroll(coords=pt, wheel_dist=-8)
+            time.sleep(0.04)
+        if scroll is not None:
+            scroll(coords=pt, wheel_dist=-6)
 
 
 def _scroll_cell_into_view(ctrl, dlg) -> bool:
-    """Mouse-wheel the dialog. Do not click cells — that clears a Shift selection."""
+    """Wheel the Name column only. Do not click — that hits option widgets."""
     try:
         from pywinauto.mouse import scroll
     except Exception:
@@ -1493,56 +2087,55 @@ def _scroll_cell_into_view(ctrl, dlg) -> bool:
     host = _cell_rect(dlg)
     if host is None:
         return False
-    cx = (int(host.left) + int(host.right)) // 2
-    cy = (int(host.top) + int(host.bottom)) // 2
-    for _ in range(40):
+    pt = (int(host.left) + 36, int(host.top) + (int(host.bottom) - int(host.top)) // 3)
+    for _ in range(16):
         if _cell_on_screen(ctrl, dlg):
             return True
         rect = _cell_rect(ctrl)
-        if rect is not None and int(rect.bottom) > int(host.bottom) - 28:
-            scroll(coords=(cx, cy), wheel_dist=-4)
+        if rect is None:
+            return False
+        if int(rect.bottom) > int(host.bottom) - 90:
+            scroll(coords=pt, wheel_dist=-6)
         else:
-            scroll(coords=(cx, cy), wheel_dist=4)
-        time.sleep(0.04)
+            scroll(coords=pt, wheel_dist=6)
+        time.sleep(0.02)
     return _cell_on_screen(ctrl, dlg)
 
 
 def _cell_on_screen(ctrl, dlg) -> bool:
+    """Cheap rect check — do not walk the UIA tree (that made every row slow)."""
     rect = _cell_rect(ctrl)
     host = _cell_rect(dlg)
     if rect is None or host is None:
         return False
-    return int(rect.top) >= int(host.top) + 8 and int(rect.bottom) <= int(host.bottom) - 8
+    return int(rect.top) >= int(host.top) + 28 and int(rect.bottom) <= int(host.bottom) - 90
 
 
 def _cell_is_sync(ctrl) -> bool:
     return _is_sync_waveform_label(_legacy_value(ctrl) or "")
 
 
-def _set_one_variable_cell(ctrl, dlg, to_var: str, *, pause: float = 0.18) -> None:
-    """Activate the cell, open its dropdown, click Async Waveform in the list."""
+def _set_one_variable_cell(
+    ctrl, dlg, to_var: str, *, pause: float = 0.16, col_span: tuple[int, int] | None = None
+) -> None:
+    """Select the Variable cell, click its arrow, then pick exact Async Waveform."""
     from pywinauto.keyboard import send_keys
 
     if not _cell_on_screen(ctrl, dlg):
         _scroll_cell_into_view(ctrl, dlg)
-    if not _click_cell_body(ctrl):
+    if not _click_cell_body(ctrl, col_span):
         return
     time.sleep(pause)
-    if not _click_cell_dropdown(ctrl):
+    if not _click_cell_dropdown(ctrl, col_span):
         send_keys("%{DOWN}")
-    time.sleep(pause + 0.12)
-    if _click_combo_item(to_var, timeout=2.0):
-        time.sleep(pause)
+    time.sleep(pause)
+    if _click_combo_item(to_var, timeout=1.0):
+        time.sleep(0.12)
         return
     send_keys("%{DOWN}")
-    time.sleep(pause + 0.12)
-    if _click_combo_item(to_var, timeout=1.5):
-        time.sleep(pause)
-        return
-    send_keys("{UP}")
-    time.sleep(0.12)
-    send_keys("{ENTER}")
     time.sleep(pause)
+    if _click_combo_item(to_var, timeout=0.8):
+        time.sleep(0.12)
 
 
 def _pending_sync_rows(rows, dlg, col: int | None) -> list[tuple[int, object, str]]:
@@ -1597,7 +2190,7 @@ def _dismiss_variable_combo(dlg) -> None:
     if rect is None:
         return
     _mouse_click_xy(int(rect.left) + 80, int(rect.top) + 12)
-    time.sleep(0.3)
+    time.sleep(0.08)
 
 
 def _click_ok_control(dlg) -> bool:
@@ -1649,9 +2242,13 @@ def _wait_plot_groups_ready(adre=None, session=None, timeout: float = 120) -> No
 def _set_all_plot_variables(dlg, from_var: str, to_var: str) -> int:
     """Set every Sync Waveform cell to Async; retry leftovers, then OK."""
     _ensure_foreground(dlg)
-    time.sleep(0.2)
+    _lower_config_splitter(dlg)
+    _select_lower_half_options(dlg)
     cells = _flexgrid_cells(dlg)
     col = _plot_variable_column(cells)
+    col_span = _variable_col_span(cells, col)
+    if col_span is not None:
+        print(f"[adre] Variable column x={col_span[0]}..{col_span[1]}", flush=True)
     rows = _variable_column_cells(cells, col) if col is not None else []
     if not rows:
         extras = _named_value_controls(dlg, from_var)
@@ -1665,13 +2262,26 @@ def _set_all_plot_variables(dlg, from_var: str, to_var: str) -> int:
     for attempt in range(1, 3):
         if not pending:
             break
-        pause = 0.16 if attempt == 1 else 0.28
+        pause = 0.16 if attempt == 1 else 0.20
         print(f"[adre] pass {attempt}: {len(pending)} Sync cell(s)", flush=True)
+        mid = max(1, len(pending) // 2)
         for index, (_row, ctrl, _val) in enumerate(pending, start=1):
-            _set_one_variable_cell(ctrl, dlg, to_var, pause=pause)
+            if index == mid:
+                print("[adre] lower half of channel list", flush=True)
+                host = _cell_rect(dlg)
+                if host is not None:
+                    try:
+                        from pywinauto.mouse import scroll
+
+                        pt = (int(host.left) + 36, int(host.top) + (int(host.bottom) - int(host.top)) // 3)
+                        for _ in range(8):
+                            scroll(coords=pt, wheel_dist=-6)
+                            time.sleep(0.02)
+                    except Exception:
+                        pass
+            _set_one_variable_cell(ctrl, dlg, to_var, pause=pause, col_span=col_span)
             if index == 1 or index == len(pending) or index % 10 == 0:
                 print(f"[adre]   {index}/{len(pending)}", flush=True)
-        time.sleep(0.25)
         pending = _pending_sync_rows(pending, dlg, col)
         if pending:
             print(
@@ -2169,6 +2779,7 @@ def _select_collapsed_cards(cards) -> None:
 
 def launch_adre(adre_exe: Path, database: Path | None = None) -> "object":
     """Start ADRE (or attach if it is already running) and return a pywinauto app."""
+    _enable_dpi_awareness()
     _require_pywinauto()
     from pywinauto import Application
 
@@ -2499,6 +3110,37 @@ def _step_handlers(app, job: ExportJob) -> dict[str, Callable[[dict[str, Any]], 
             f"Timed out after {timeout:.0f}s waiting for {need} CSV files in {job.inbox}"
         )
 
+    def split_static(step: dict[str, Any]) -> None:
+        """Per-channel split + rotor groups. Only after the static Tabular List CSV exists."""
+        from adre_split import split_export
+
+        named = step.get("path") or "{inbox}\\export_static.csv"
+        target = Path(named.replace("{inbox}", str(job.inbox)))
+        timeout = float(step.get("timeout", 45))
+        deadline = time.time() + timeout
+        last_size = -1
+        stable = 0
+        while time.time() < deadline:
+            if target.is_file() and target.stat().st_size > 80:
+                size = target.stat().st_size
+                if size == last_size:
+                    stable += 1
+                    if stable >= 2:
+                        break
+                else:
+                    stable = 0
+                last_size = size
+            time.sleep(0.5)
+        if not target.is_file():
+            print(f"[adre] split static skipped — {target.name} not extracted yet", flush=True)
+            return
+        dest = job.inbox.parent / "channels"
+        result = split_export(target, dest)
+        print(
+            f"[adre] split static {result.n_channels} channels → {result.groups_folder or dest}",
+            flush=True,
+        )
+
     return {
         "wait": wait,
         "focus_main": focus_main,
@@ -2514,12 +3156,14 @@ def _step_handlers(app, job: ExportJob) -> dict[str, Callable[[dict[str, Any]], 
         "configure_plots": configure_plots,
         "data_source": data_source,
         "wait_for_csvs": wait_for_csvs,
+        "split_static": split_static,
         "placeholder": placeholder,
         "todo": placeholder,
     }
 
 
 def run_recipe(app, job: ExportJob, recipe: dict[str, Any]) -> None:
+    _enable_dpi_awareness()
     handlers = _step_handlers(app, job)
     steps = recipe.get("steps") or []
     if not steps:
