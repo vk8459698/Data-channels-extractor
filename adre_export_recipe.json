@@ -142,6 +142,12 @@
       "note": "Async Waveform timebase CSV"
     },
     {
+      "action": "wait_async_or_retry",
+      "path": "{inbox}\\export_async.csv",
+      "timeout_seconds": 60,
+      "note": "If export_async.csv is missing after 1 minute, start Async again"
+    },
+    {
       "action": "wait_for_csvs",
       "min_files": 3,
       "timeout_seconds": 900,

@@ -151,10 +151,10 @@ def _window_spec(win):
 
 
 def _adre_top_window():
-    for pat in (r"^ADRE® Sxp", r"^ADRE Sxp\b", r"^ADRE"):
-        found = _uia_window_by_title(pat)
-        if found is not None and "Cursor" not in (found.window_text() or ""):
-            return found
+    for win in _desktop_windows():
+        text = win.window_text() or ""
+        if _is_adre_main_window_title(text):
+            return win
     return None
 
 
@@ -179,22 +179,24 @@ def _by_auto_id(root, auto_id: str, *, descendants: bool = True):
     return None
 
 
+def _is_adre_main_window_title(text: str) -> bool:
+    """Configuration Hierarchy — not HV, not ADRE® Sxp Message."""
+    title = (text or "").strip()
+    if not title or "Cursor" in title:
+        return False
+    folded = title.casefold()
+    if "plot session" in folded or "message" in folded:
+        return False
+    if "plot group configuration" in folded:
+        return False
+    return bool(re.search(r"^ADRE", title))
+
+
 def _main_window(app, title_re: str = r"^ADRE"):
-    """ADRE® Sxp (Configuration Hierarchy). Never HV - Plot Session."""
-    try:
-        spec = app.window(title_re=title_re)
-        text = spec.window_text() or ""
-        if "Plot Session" not in text:
-            return spec
-    except Exception:
-        pass
-    for pat in (r"^ADRE® Sxp", r"^ADRE Sxp\b", title_re):
-        found = _uia_window_by_title(pat)
-        if found is not None and "Plot Session" not in (found.window_text() or ""):
-            return _window_spec(found)
+    """ADRE® Sxp (Configuration Hierarchy). Never HV - Plot Session or message boxes."""
     for win in _desktop_windows():
         text = win.window_text() or ""
-        if not text or "Cursor" in text or "Plot Session" in text:
+        if not _is_adre_main_window_title(text):
             continue
         if re.search(title_re, text, re.I) or re.search(r"^ADRE", text, re.I):
             return _window_spec(win)
@@ -617,8 +619,62 @@ def _dismiss_adre_prompts() -> None:
             return
 
 
+def _find_adre_message_dialog():
+    for win in _desktop_windows():
+        try:
+            title = (win.window_text() or "").strip()
+        except Exception:
+            continue
+        if not title or "Cursor" in title:
+            continue
+        folded = title.casefold()
+        if "adre" in folded and "message" in folded:
+            return win
+    return None
+
+
+def _dismiss_retrieve_data_timeout(click: str = "Cancel") -> bool:
+    """Retry or Cancel on 'Timed out while waiting to retrieve data'."""
+    dlg = _find_adre_message_dialog()
+    if dlg is None:
+        return False
+    want = click.casefold()
+    btn = None
+    try:
+        for child in list(dlg.children()):
+            text = (child.window_text() or "").strip()
+            if text.casefold() == want:
+                btn = child
+                break
+            try:
+                for grand in child.children():
+                    gtext = (grand.window_text() or "").strip()
+                    if gtext.casefold() == want:
+                        btn = grand
+                        break
+            except Exception:
+                pass
+            if btn is not None:
+                break
+    except Exception:
+        btn = None
+    print(
+        f"[adre] ADRE Sxp Message: Timed out while waiting to retrieve data — {click}",
+        flush=True,
+    )
+    if btn is not None:
+        try:
+            btn.click_input()
+            time.sleep(0.45)
+            return True
+        except Exception:
+            pass
+    return True
+
+
 def _close_plot_session(adre_window=None) -> None:
     """Close HV - Plot Session so Configuration Hierarchy is clickable again."""
+    _dismiss_retrieve_data_timeout(click="Cancel")
     session = _plot_session_window(adre_window)
     if session is None:
         return
@@ -3323,6 +3379,77 @@ def _step_handlers(app, job: ExportJob) -> dict[str, Callable[[dict[str, Any]], 
             f"Timed out after {timeout:.0f}s waiting for {need} CSV files in {job.inbox}"
         )
 
+    def wait_async_or_retry(step: dict[str, Any]) -> None:
+        """If export_async.csv does not arrive in 1 minute, start Async again."""
+        named = step.get("path") or "{inbox}\\export_async.csv"
+        dest = Path(named.replace("{inbox}", str(job.inbox)))
+        timeout = float(step.get("timeout_seconds", 60))
+        attempt = 0
+        while True:
+            attempt += 1
+            if attempt > 1:
+                print(
+                    f"[adre] no {dest.name} after {int(timeout)}s — start Async again "
+                    f"(attempt {attempt})",
+                    flush=True,
+                )
+                _dismiss_retrieve_data_timeout(click="Cancel")
+                time.sleep(0.4)
+                reopen = {
+                    "title_re": step.get("title_re", r"^ADRE"),
+                    "plot": "Timebase",
+                    "plot_timeout": 30,
+                    "database_name": step.get("database_name"),
+                }
+                select_sampling_cards(reopen)
+                context_plots(reopen)
+                time.sleep(8)
+                tree_click(
+                    {
+                        "title_re": reopen["title_re"],
+                        "database_name": reopen.get("database_name"),
+                        "name": "New Timebase Plot Group",
+                        "name_contains": "Timebase Plot Group",
+                        "double": True,
+                        "timeout": 60,
+                    }
+                )
+                configure_plots(
+                    {
+                        "title_re": reopen["title_re"],
+                        "plot_group_contains": step.get("plot_group_contains")
+                        or "Timebase",
+                        "from_variable": step.get("from_variable") or "Sync Waveform",
+                        "variable": step.get("variable") or "Async Waveform",
+                    }
+                )
+                export_plots(
+                    {
+                        "title_re": reopen["title_re"],
+                        "plot_group_contains": step.get("plot_group_contains")
+                        or "Timebase",
+                    }
+                )
+                time.sleep(2)
+                open_file_dialog({"path": named})
+            print(
+                f"[adre] waiting {int(timeout)}s for {dest.name} in {job.inbox}",
+                flush=True,
+            )
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                _dismiss_retrieve_data_timeout(click="Retry")
+                try:
+                    if dest.is_file() and dest.stat().st_size >= 80:
+                        print(
+                            f"[adre] {dest.name} arrived ({dest.stat().st_size} bytes)",
+                            flush=True,
+                        )
+                        return
+                except OSError:
+                    pass
+                time.sleep(1)
+
     def split_static(step: dict[str, Any]) -> None:
         """Per-channel split + rotor groups. Only after a real Tabular List is on disk.
 
@@ -3380,6 +3507,7 @@ def _step_handlers(app, job: ExportJob) -> dict[str, Callable[[dict[str, Any]], 
         "configure_plots": configure_plots,
         "data_source": data_source,
         "wait_for_csvs": wait_for_csvs,
+        "wait_async_or_retry": wait_async_or_retry,
         "split_static": split_static,
         "placeholder": placeholder,
         "todo": placeholder,

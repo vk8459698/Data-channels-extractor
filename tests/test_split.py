@@ -399,6 +399,12 @@ def test_plot_config_dialog_title_match():
     assert _item_text_is_configure("Configure...")
     assert not _item_text_is_configure("Configuration Hierarchy")
 
+    from adre_export import _is_adre_main_window_title
+
+    assert _is_adre_main_window_title("ADRE® Sxp")
+    assert not _is_adre_main_window_title("ADRE® Sxp Message")
+    assert not _is_adre_main_window_title("HV - Plot Session")
+
     class Rect:
         left, top, right, bottom = 100, 80, 900, 680
 
